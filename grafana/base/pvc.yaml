@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: storage
+spec:
+  # ReadWriteOnce supports a single Grafana replica with SQLite.
+  # For HA (multiple replicas), switch to ReadWriteMany and configure
+  # a shared storage class (NFS, ODF CephFS) and use Postgres as the database.
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName is intentionally omitted to use the cluster default.
+  # Set explicitly in overlays/prod/kustomization.yaml for production environments
+  # where a specific storage class (e.g. gp3-csi, ocs-storagecluster-cephfs) is required.

@@ -1,0 +1,40 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: grafana
+  namespace: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: route
+  annotations:
+    # Enforce HSTS. Browsers will refuse plain-HTTP connections for 1 year.
+    # Remove or shorten max-age during initial rollout until you are confident
+    # in the TLS configuration.
+    haproxy.router.openshift.io/hsts_header: max-age=31536000;includeSubDomains;preload
+    # Extended timeout for Grafana Live websocket connections (default is 30s).
+    haproxy.router.openshift.io/timeout: 300s
+    # Disable request buffering so streaming responses (e.g. /api/live/ws) work correctly.
+    haproxy.router.openshift.io/disable_cookies: "false"
+spec:
+  # hostname: grafana.apps.CLUSTER_DOMAIN
+  # Omit to let OCP auto-assign a hostname from the cluster wildcard domain.
+  # Set explicitly in overlays so the SA oauth-redirectreference annotation resolves
+  # to a stable, known hostname and the OAuthClient redirectURIs are predictable.
+  to:
+    kind: Service
+    name: grafana
+    weight: 100
+  port:
+    targetPort: proxy-http
+  tls:
+    # Edge termination: OCP router terminates TLS. Traffic between the router
+    # and the Service travels over the cluster SDN (already encrypted at the
+    # network layer on most OCP installations).
+    termination: edge
+    # Redirect HTTP to HTTPS automatically. Do not use "None" — it would
+    # expose the OAuth callback over plain HTTP, leaking the authorization code.
+    insecureEdgeTerminationPolicy: Redirect
+    # certificate, key, caCertificate: omit to use the default wildcard
+    # certificate provisioned by the cluster's ingress operator.
+    # Provide explicit values here or in a Secret + overlay patch for custom certs.
+  wildcardPolicy: None

@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: service
+  annotations:
+    # Uncomment the line below to upgrade from edge TLS termination to re-encrypt:
+    # OCP will auto-provision a serving certificate for this Service and store it
+    # in the named Secret, which you then mount into the oauth-proxy container.
+    # Change --http-address to --https-address in the proxy args and point
+    # --tls-cert / --tls-key at the mounted cert. Update route tls.termination
+    # to "reencrypt" and set tls.destinationCACertificate accordingly.
+    # service.beta.openshift.io/serving-cert-secret-name: grafana-tls
+spec:
+  selector:
+    app.kubernetes.io/name: grafana
+  type: ClusterIP
+  ports:
+  # Only the oauth-proxy port is exposed. Grafana's port 3000 is intentionally
+  # absent — it is bound to 127.0.0.1 inside the pod and requires no Service.
+  - name: proxy-http
+    port: 4180
+    targetPort: proxy-http
+    protocol: TCP

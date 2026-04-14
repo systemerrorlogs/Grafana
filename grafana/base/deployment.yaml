@@ -1,0 +1,276 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/version: "10.4.3"
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  # Recreate is required because the PVC uses ReadWriteOnce.
+  # A rolling update would attempt to bind the PVC to a new pod before the old
+  # pod releases it, leaving the new pod stuck in ContainerCreating.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/version: "10.4.3"
+    spec:
+      serviceAccountName: grafana
+
+      # ──────────────────────────────────────────────────────────────────────
+      # Pod-level Security Context (nonroot SCC compatible)
+      # ──────────────────────────────────────────────────────────────────────
+      securityContext:
+        # Enforce non-root at the pod level. Containers that declare runAsUser: 0
+        # will be rejected by the admission webhook.
+        runAsNonRoot: true
+        # Grafana's official image is built to run as UID/GID 472.
+        # nonroot SCC accepts any non-zero UID, including 472.
+        runAsUser: 472
+        runAsGroup: 472
+        # fsGroup: 472 causes kubelet to recursively chown the PVC mount point
+        # to GID 472 before starting containers, making /var/lib/grafana writable
+        # without requiring a UID-0 initContainer (which would need anyuid).
+        fsGroup: 472
+        # Always: ensures the chown runs even when reusing an existing PVC that
+        # was provisioned with different ownership. Safe default for PVCs.
+        fsGroupChangePolicy: Always
+        # Restrict syscalls to the default allowlist. Supported by OCP 4.11+.
+        seccompProfile:
+          type: RuntimeDefault
+
+      # No initContainers. The fsGroup + fsGroupChangePolicy: Always combination
+      # replaces the common "chown initContainer" pattern without needing anyuid.
+
+      containers:
+      # ────────────────────────────────────────────────────────────────────
+      # Container 1: Grafana
+      # ────────────────────────────────────────────────────────────────────
+      - name: grafana
+        # Pin to a specific minor release. Update via overlay patch in production.
+        # In air-gapped environments, mirror to the internal registry and override
+        # the image field in the prod overlay.
+        image: grafana/grafana:10.4.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        # Port 3000 is bound to 127.0.0.1 (set in grafana.ini [server] http_addr).
+        # It is NOT exposed via a Service. Only the oauth-proxy sidecar accesses it.
+        - name: grafana-http
+          containerPort: 3000
+          protocol: TCP
+        env:
+        # Grafana reads GF_* environment variables to override grafana.ini settings.
+        # The admin password is injected from the Secret to avoid storing it in the ConfigMap.
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-secrets
+              key: GF_SECURITY_ADMIN_PASSWORD
+        # Point Grafana at the mounted grafana.ini ConfigMap.
+        - name: GF_PATHS_CONFIG
+          value: /etc/grafana/grafana.ini
+        # Override root_url at runtime via env var to avoid editing the ConfigMap
+        # per environment. Set this in the overlay's deployment patch instead.
+        # - name: GF_SERVER_ROOT_URL
+        #   value: https://grafana.apps.CLUSTER_DOMAIN/
+        volumeMounts:
+        - name: grafana-config
+          mountPath: /etc/grafana/grafana.ini
+          subPath: grafana.ini
+          readOnly: true
+        - name: grafana-data
+          mountPath: /var/lib/grafana
+        # /var/log/grafana must be on a writable volume when readOnlyRootFilesystem
+        # is true. emptyDir is ephemeral; log aggregation (Loki/EFK) captures stdout.
+        - name: grafana-logs
+          mountPath: /var/log/grafana
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          # Set false if Grafana writes temporary files to paths not on volumes.
+          # Set true and add any missing writable paths as emptyDir mounts for
+          # stricter hardening.
+          readOnlyRootFilesystem: false
+          runAsNonRoot: true
+          runAsUser: 472
+          runAsGroup: 472
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+      # ────────────────────────────────────────────────────────────────────
+      # Container 2: oauth-proxy
+      # Handles all authentication. Users authenticate against the OpenShift
+      # OAuth server (which delegates to the LDAP identity provider configured
+      # at the cluster level). Grafana receives only the validated username.
+      # ────────────────────────────────────────────────────────────────────
+      - name: oauth-proxy
+        # Pin to the minor version matching your OCP cluster. The proxy must
+        # be compatible with the cluster's OAuth server API.
+        image: quay.io/openshift/origin-oauth-proxy:4.15
+        imagePullPolicy: IfNotPresent
+        ports:
+        # Port 4180 is the public entry point. The Service and Route target this port.
+        - name: proxy-http
+          containerPort: 4180
+          protocol: TCP
+        args:
+        # ── Upstream ───────────────────────────────────────────────────────
+        # Proxy authenticated requests to Grafana on localhost. Port 3000 is
+        # accessible only within this pod (loopback binding in grafana.ini).
+        - --upstream=http://localhost:3000
+        # ── Listen ─────────────────────────────────────────────────────────
+        - --http-address=0.0.0.0:4180
+        # ── Auth mode: ServiceAccount token ────────────────────────────────
+        # OCP auto-creates an OAuthClient named
+        #   system:serviceaccount:grafana:grafana
+        # using the SA's oauth-redirectreference annotation to derive redirect URIs.
+        # No manual OAuthClient secret is required. Comment out and use
+        # --client-id / --client-secret-file if deploying oauthclient.yaml instead.
+        - --openshift-service-account=grafana
+        # ── Provider ───────────────────────────────────────────────────────
+        - --provider=openshift
+        # ── Authorization check ────────────────────────────────────────────
+        # Require the authenticated user to have GET access to Services in the
+        # grafana namespace. This prevents users who can authenticate to OCP
+        # (i.e. have LDAP credentials) but have no RBAC in this project from
+        # accessing Grafana. Adjust the resource/verb to match your access policy.
+        - --openshift-sar={"namespace":"grafana","resource":"services","verb":"get"}
+        # ── Token delegation ───────────────────────────────────────────────
+        # Delegate token review for the root path to the API server.
+        # Required alongside --openshift-sar to validate bearer tokens.
+        - --openshift-delegate-urls={"/":{"namespace":"grafana","resource":"services","verb":"get"}}
+        # ── TLS CA ─────────────────────────────────────────────────────────
+        # Use the cluster CA bundle (mounted automatically into every pod) to
+        # verify the OCP API server's TLS certificate during token review calls.
+        - --openshift-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        # ── Cookie security ────────────────────────────────────────────────
+        # Secure=true is required when the site is served over HTTPS.
+        - --cookie-secure=true
+        # Read the cookie secret from a file rather than an env var to prevent
+        # exposure in `oc describe pod` output.
+        - --cookie-secret-file=/etc/oauth/secrets/cookie-secret
+        # ── Header forwarding ──────────────────────────────────────────────
+        # Pass X-Forwarded-User, X-Forwarded-Email, X-Forwarded-Preferred-Username
+        # headers to Grafana. These are consumed by [auth.proxy] headers config.
+        - --pass-user-headers=true
+        # ── Email domain restriction ───────────────────────────────────────
+        # "*" allows all authenticated OCP users regardless of email domain.
+        # Restrict to a specific domain (e.g. example.com) if needed.
+        - --email-domain=*
+        # ── Probe bypass ───────────────────────────────────────────────────
+        # Allow Kubernetes liveness/readiness probes to reach /api/health without
+        # going through OAuth authentication. The path is proxied to Grafana.
+        - --skip-auth-regex=^/api/health$
+        volumeMounts:
+        - name: grafana-secrets-vol
+          mountPath: /etc/oauth/secrets
+          readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          # origin-oauth-proxy image uses UID 65532 (distroless nonroot).
+          runAsUser: 65532
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /oauth/healthz
+            port: 4180
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /oauth/healthz
+            port: 4180
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+      # ────────────────────────────────────────────────────────────────────
+      # Volumes
+      # ────────────────────────────────────────────────────────────────────
+      volumes:
+      # grafana.ini ConfigMap, mounted read-only.
+      - name: grafana-config
+        configMap:
+          name: grafana-config
+          defaultMode: 0440
+
+      # Persistent storage for the Grafana SQLite database, plugins, and
+      # other stateful data. Owned by GID 472 via pod fsGroup.
+      - name: grafana-data
+        persistentVolumeClaim:
+          claimName: grafana-data
+
+      # Ephemeral log directory. Logs are written to stdout/stderr and captured
+      # by the cluster log aggregation stack. Not persisted.
+      - name: grafana-logs
+        emptyDir: {}
+
+      # Secret volume exposing only the cookie-secret key to the oauth-proxy.
+      # Using items projection avoids exposing GF_SECURITY_ADMIN_PASSWORD and
+      # OAUTH_CLIENT_SECRET to the oauth-proxy container's filesystem.
+      - name: grafana-secrets-vol
+        secret:
+          secretName: grafana-secrets
+          items:
+          - key: OAUTH_COOKIE_SECRET
+            path: cookie-secret
+          defaultMode: 0400
+
+      # Soft preference to avoid scheduling two Grafana pods on the same node
+      # (relevant if replicas are scaled up with RWX PVC + Postgres backend).
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: grafana
+              topologyKey: kubernetes.io/hostname

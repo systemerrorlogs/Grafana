@@ -1,0 +1,20 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: grafana-auth-delegator
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: rbac
+subjects:
+- kind: ServiceAccount
+  name: grafana
+  namespace: grafana
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  # system:auth-delegator grants the SA the ability to make TokenReview and
+  # SubjectAccessReview calls against the API server. The oauth-proxy sidecar
+  # requires this to validate bearer tokens issued by the OpenShift OAuth server.
+  # This MUST be a ClusterRoleBinding — TokenReview/SAR are cluster-scoped
+  # resources and cannot be granted via a namespace-scoped RoleBinding.
+  name: system:auth-delegator

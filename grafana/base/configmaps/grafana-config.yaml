@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: config
+data:
+  grafana.ini: |
+    ################################################################################
+    # Grafana Configuration
+    # Authentication: OpenShift OAuth Proxy (proxy auth mode)
+    # LDAP is handled upstream by the OpenShift OAuth identity provider — Grafana
+    # has no direct LDAP connection.
+    ################################################################################
+
+    [server]
+    # Bind only to loopback. The oauth-proxy sidecar is the sole entry point;
+    # no other pod or process can reach Grafana directly on port 3000.
+    http_addr = 127.0.0.1
+    http_port = 3000
+    # Must match the Route hostname exactly so that OAuth callbacks and
+    # redirect URIs resolve correctly.
+    # OVERRIDE THIS in your overlay: grafana.ini root_url patch or GF_SERVER_ROOT_URL env var.
+    root_url = https://grafana.apps.CLUSTER_DOMAIN/
+    serve_from_sub_path = false
+    # TLS is terminated at the Route (edge termination). Grafana speaks plain HTTP.
+    protocol = http
+    # Enable Grafana Live (websocket). Route timeout annotation handles the keepalive.
+    enable_gzip = true
+
+    [database]
+    # SQLite is sufficient for single-replica deployments.
+    # For HA (multiple replicas + RWX PVC), switch to postgres or mysql and
+    # update accessModes in pvc.yaml to ReadWriteMany.
+    type = sqlite3
+    path = /var/lib/grafana/grafana.db
+    # WAL mode improves concurrent read performance and reduces lock contention.
+    wal = true
+    cache_mode = shared
+
+    [security]
+    admin_user = admin
+    # admin_password is intentionally absent here.
+    # Inject via env var GF_SECURITY_ADMIN_PASSWORD from the grafana-secrets Secret.
+    disable_gravatar = true
+    # Required when Grafana is served over HTTPS (which it is, via the Route).
+    cookie_secure = true
+    cookie_samesite = lax
+    # Deny iframe embedding to prevent clickjacking.
+    x_frame_options = SAMEORIGIN
+    content_security_policy = true
+
+    [auth]
+    # All non-proxy authentication is disabled. Every user must come through
+    # the oauth-proxy sidecar. The admin user can still call the API with
+    # basic auth if auth.basic is re-enabled, which is intentionally blocked below.
+    disable_login_form = true
+    disable_signout_menu = false
+    # On sign-out, redirect to oauth-proxy's sign_out endpoint so the OAuth
+    # session cookie is also cleared (not just the Grafana session).
+    signout_redirect_url = /oauth/sign_out
+
+    [auth.proxy]
+    # Core of the authentication flow. oauth-proxy injects X-Forwarded-User
+    # after validating the user's OpenShift OAuth token.
+    enabled = true
+    header_name = X-Forwarded-User
+    header_property = username
+    # Automatically create a Grafana user record on first login.
+    auto_sign_up = true
+    # Cache the user lookup for 60 minutes to reduce database round-trips.
+    sync_ttl = 60
+    # SECURITY CRITICAL: only trust the forwarded header from the loopback address.
+    # Without this, any in-cluster pod that somehow reaches port 3000 could forge
+    # X-Forwarded-User and authenticate as any user. The loopback binding in [server]
+    # is the primary control; this is defense-in-depth.
+    whitelist = 127.0.0.1
+    # Map additional headers passed by oauth-proxy --pass-user-headers.
+    headers = Email:X-Forwarded-Email, Name:X-Forwarded-Preferred-Username
+
+    [auth.anonymous]
+    # No unauthenticated access.
+    enabled = false
+
+    [auth.basic]
+    # Disable HTTP Basic auth to prevent bypassing the oauth-proxy.
+    # The Grafana admin API also respects this setting.
+    enabled = false
+
+    [auth.ldap]
+    # LDAP is NOT configured here. LDAP authentication is handled entirely by the
+    # OpenShift OAuth identity provider configured at the cluster level by the
+    # cluster admin. Grafana receives only the authenticated username from oauth-proxy.
+    enabled = false
+
+    [users]
+    # Add new users to org 1 automatically on first proxy-auth login.
+    auto_assign_org = true
+    auto_assign_org_id = 1
+    # Default role for all new users. Adjust to Editor or Admin if appropriate.
+    # Fine-grained role assignment can be done inside Grafana after first login.
+    auto_assign_org_role = Viewer
+    # Prevent self-registration — all provisioning comes through oauth-proxy.
+    allow_sign_up = false
+    viewers_can_edit = false
+
+    [log]
+    mode = console
+    level = info
+
+    [log.console]
+    # JSON format for compatibility with log aggregation stacks (Loki, EFK, Splunk).
+    format = json
+
+    [analytics]
+    reporting_enabled = false
+    check_for_updates = false
+    check_for_plugin_updates = false
+
+    [alerting]
+    # Legacy alerting engine is disabled in favour of unified alerting below.
+    enabled = false
+
+    [unified_alerting]
+    enabled = true
+
+    [paths]
+    data = /var/lib/grafana
+    logs = /var/log/grafana
+    plugins = /var/lib/grafana/plugins
+    provisioning = /etc/grafana/provisioning
+
+    [feature_toggles]
+    # No feature toggles required for this auth configuration.

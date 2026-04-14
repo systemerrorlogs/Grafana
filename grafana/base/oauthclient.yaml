@@ -1,0 +1,47 @@
+################################################################################
+# OAuthClient — OPTIONAL (Explicit Mode)
+#
+# By default, the deployment uses ServiceAccount token mode
+# (--openshift-service-account=grafana in the oauth-proxy args). In that mode,
+# OpenShift auto-creates an OAuthClient named
+#   system:serviceaccount:grafana:grafana
+# with redirect URIs derived dynamically from the SA's oauth-redirectreference
+# annotation. No manual OAuthClient is needed.
+#
+# Apply this manifest ONLY if you need explicit control over:
+#   - grantMethod (change "auto" to "prompt" to show a user consent screen)
+#   - scopeRestrictions (limit which OAuth scopes the client may request)
+#   - A human-readable client name instead of the SA-derived name
+#
+# If using this manifest:
+#   1. Replace REPLACE_WITH_ROUTE_HOSTNAME with your Route's hostname.
+#   2. Set secret to match OAUTH_CLIENT_SECRET in grafana-secrets.yaml.
+#   3. Change oauth-proxy args from --openshift-service-account to:
+#        --client-id=grafana-proxy
+#        --client-secret-file=/etc/oauth/secrets/oauth-client-secret
+#      and add OAUTH_CLIENT_SECRET to the secret volume mount items in deployment.yaml.
+################################################################################
+apiVersion: oauth.openshift.io/v1
+kind: OAuthClient
+metadata:
+  name: grafana-proxy
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: oauthclient
+# auto: skip the user consent screen for internal tools.
+# Change to "prompt" if explicit per-user grant approval is required by policy.
+grantMethod: auto
+redirectURIs:
+# Must exactly match the URL that oauth-proxy uses for the OAuth callback.
+# oauth-proxy's default callback path is /oauth/callback.
+- https://REPLACE_WITH_ROUTE_HOSTNAME/oauth/callback
+# Must match the OAUTH_CLIENT_SECRET value in grafana-secrets.yaml.
+# Store the real value in the Secret, not here.
+secret: "REPLACE_WITH_OAUTH_CLIENT_SECRET"
+# Restrict the OAuth scopes this client may request.
+# user:info is sufficient for proxy auth (name + email). user:check-access
+# is required if oauth-proxy uses --openshift-sar for authorization checks.
+scopeRestrictions:
+- literals:
+  - user:info
+  - user:check-access
